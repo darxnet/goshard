@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install svu
+        run: go install github.com/caarlos0/svu/v2@latest
+
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEXT=$(svu next)
+          if [ "$(svu current)" == "$NEXT" ]; then
+            echo "Version $NEXT already exists, skipping release."
+          else
+            echo "Releasing $NEXT..."
+            gh release create "$NEXT" --generate-notes
+          fi
