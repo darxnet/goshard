@@ -1,7 +1,7 @@
 # goshard
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/darxnet/goshard.svg)](https://pkg.go.dev/github.com/darxnet/goshard)
-[![Go](https://github.com/darxnet/goshard/actions/workflows/go.yml/badge.svg)](https://github.com/darxnet/goshard/actions/workflows/go.yml)
+[![Go](https://github.com/darxnet/goshard/actions/workflows/release.yml/badge.svg)](https://github.com/darxnet/goshard/actions/workflows/release.yml)
 ![Coverage](https://img.shields.io/badge/Coverage-100%25-brightgreen)
 
 `goshard` is a high-performance, concurrent-safe sharded map for Go. 

@@ -20,6 +20,23 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      - name: Run Tests
+        run: go test -race -failfast -coverprofile=coverage.out ./...
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+
+      - name: Verify Coverage
+        run: |
+          total=$(go tool cover -func=coverage.out | grep "total:" | awk '{print $3}' | sed 's/%//')
+          echo "Total coverage: $total%"
+          if awk "BEGIN { exit !($total < 99) }"; then
+            echo "Coverage is below 99%"
+            exit 1
+          fi
+
       - name: Install svu
         run: go install github.com/caarlos0/svu/v2@latest
 

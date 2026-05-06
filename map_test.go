@@ -175,6 +175,26 @@ func TestRangeStopsEarly(t *testing.T) {
 	}
 }
 
+func TestRangeStopsEarly100(t *testing.T) {
+	t.Parallel()
+
+	m := goshard.NewMap[int, int](1)
+
+	for i := range 100 {
+		m.Store(i, i)
+	}
+
+	visited := 0
+	m.Range(func(_, _ int) bool {
+		visited++
+		return false
+	})
+
+	if visited != 1 {
+		t.Fatal("Range should stop after callback returns false")
+	}
+}
+
 func TestGobDecodeIntoEmptyMap(t *testing.T) {
 	t.Parallel()
 
