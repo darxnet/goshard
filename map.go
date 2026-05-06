@@ -61,7 +61,7 @@ type Map[K comparable, V any] struct {
 
 // ComparableMap is a Map with specialized atomic operations for comparable values.
 type ComparableMap[K comparable, V comparable] struct {
-	*Map[K, V]
+	Map[K, V]
 }
 
 func nextPow2(x int) int {
@@ -116,7 +116,7 @@ func NewMap[K comparable, V any](n int) *Map[K, V] {
 // If n is zero, NewComparableMap chooses a concurrency-oriented default;
 // otherwise n is rounded up to the next power of two.
 func NewComparableMap[K comparable, V comparable](n int) *ComparableMap[K, V] {
-	return &ComparableMap[K, V]{Map: NewMap[K, V](n)}
+	return &ComparableMap[K, V]{Map: *NewMap[K, V](n)}
 }
 
 func (sm *Map[K, V]) idx(key K) int {
