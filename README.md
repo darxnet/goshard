@@ -46,7 +46,9 @@ go get github.com/darxnet/goshard
 ```go
 // The zero value is ready to use!
 var m goshard.Map[string, any]
-var mc goshard.MapComparable[string, int]
+
+// Comparable map with 64 shards
+mc := goshard.NewComparableMap[int, int](64)
 
 // Simple Load/Store
 m.Store("rps", 1_000_000)
