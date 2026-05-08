@@ -1,0 +1,51 @@
+version: "2"
+
+linters:
+  default: all
+  settings:
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - experimental
+        - opinionated
+        - performance
+        - style
+      disabled-checks:
+        - builtinShadow
+        - whyNoLint
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+    gosec:
+      excludes:
+        - G404
+    revive:
+      rules:
+        - name: redefines-builtin-id
+          disabled: true
+  disable:
+    - containedctx
+    - cyclop
+    - depguard
+    - exhaustruct
+    - forcetypeassert
+    - funcorder
+    - funlen
+    - gochecknoglobals
+    - goconst
+    - godox
+    - ireturn
+    - mnd
+    - nestif
+    - nlreturn
+    - noctx
+    - noinlineerr
+    - nonamedreturns
+    - nolintlint
+    - predeclared
+    - tagliatelle
+    - varnamelen
+    - wrapcheck
+    - wsl
+    - wsl_v5

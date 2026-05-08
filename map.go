@@ -8,6 +8,7 @@ package goshard
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/gob"
 	"errors"
 	"hash/maphash"
@@ -33,17 +34,16 @@ type entry[K comparable, V any] struct {
 	value V
 }
 
+type shardIndex struct {
+	shard uint64
+	index int
+}
+
 type shard[K comparable, V any] struct {
 	_  cpu.CacheLinePad
 	m  map[K]V
 	rw sync.RWMutex
 	_  cpu.CacheLinePad
-}
-
-func (s *shard[K, V]) init() {
-	if s.m == nil {
-		s.m = make(map[K]V, 1)
-	}
 }
 
 // Map is a concurrent-safe sharded map optimized for reduced lock contention
@@ -64,7 +64,7 @@ type ComparableMap[K comparable, V comparable] struct {
 	Map[K, V]
 }
 
-func nextPow2(x int) int {
+func nextPow2(x int) uint64 {
 	if x <= 1 {
 		return 1
 	}
@@ -90,10 +90,13 @@ func (sm *Map[K, V]) initSlow(n int) {
 		n = max(minShardCount, runtime.GOMAXPROCS(0)*defaultShardFactor)
 	}
 
-	n = nextPow2(n)
+	pow2 := nextPow2(n)
 
-	sm.shards = make([]shard[K, V], n)
-	sm.mask = uint64(n - 1)
+	sm.shards = make([]shard[K, V], pow2)
+	for i := range sm.shards {
+		sm.shards[i].m = make(map[K]V, 1)
+	}
+	sm.mask = pow2 - 1
 	sm.seed = maphash.MakeSeed()
 
 	sm.inited.Store(1)
@@ -119,8 +122,8 @@ func NewComparableMap[K comparable, V comparable](n int) *ComparableMap[K, V] {
 	return &ComparableMap[K, V]{Map: *NewMap[K, V](n)}
 }
 
-func (sm *Map[K, V]) idx(key K) int {
-	return int(maphash.Comparable(sm.seed, key) & sm.mask)
+func (sm *Map[K, V]) idx(key K) uint64 {
+	return maphash.Comparable(sm.seed, key) & sm.mask
 }
 
 func (sm *Map[K, V]) shard(key K) *shard[K, V] {
@@ -128,20 +131,22 @@ func (sm *Map[K, V]) shard(key K) *shard[K, V] {
 	return &sm.shards[sm.idx(key)]
 }
 
-func (sm *Map[K, V]) fillSortedBatch(keys []K) *[]shardIndex {
+func (sm *Map[K, V]) fillSorted(dst []shardIndex, keys []K) {
 	sm.init(0)
-	p := acquireShardIndexSlice(len(keys))
-	buf := *p
+	if len(dst) != len(keys) {
+		panic("dst and keys must have the same length")
+	}
+
 	for i, key := range keys {
-		buf[i] = shardIndex{
-			shard: sm.idx(key),
+		dst[i] = shardIndex{
 			index: i,
+			shard: sm.idx(key),
 		}
 	}
-	slices.SortFunc(buf, func(a, b shardIndex) int {
-		return a.shard - b.shard
+
+	slices.SortFunc(dst, func(a, b shardIndex) int {
+		return cmp.Compare(a.shard, b.shard)
 	})
-	return p
 }
 
 // Load returns the value stored in the map for a key, or the zero value if no
@@ -162,7 +167,6 @@ func (sm *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	s := sm.shard(key)
 	s.rw.Lock()
 	if actual, loaded = s.m[key]; !loaded {
-		s.init()
 		s.m[key] = value
 		actual = value
 	}
@@ -174,7 +178,6 @@ func (sm *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 func (sm *Map[K, V]) Store(key K, value V) {
 	s := sm.shard(key)
 	s.rw.Lock()
-	s.init()
 	s.m[key] = value
 	s.rw.Unlock()
 }
@@ -184,7 +187,6 @@ func (sm *Map[K, V]) Store(key K, value V) {
 func (sm *Map[K, V]) Swap(key K, value V) (previous V, loaded bool) {
 	s := sm.shard(key)
 	s.rw.Lock()
-	s.init()
 	previous, loaded = s.m[key]
 	s.m[key] = value
 	s.rw.Unlock()
@@ -290,35 +292,39 @@ func (sm *ComparableMap[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 func (sm *Map[K, V]) All() iter.Seq2[K, V] {
 	sm.init(0)
 	return func(yield func(key K, value V) bool) {
-		const rangeBatchSize = 64
+		// batchSize is a common batch size for dynamic value sizes
+		const batchSize = 1 << 10
 
-		buf := make([]entry[K, V], 0, rangeBatchSize)
+		// stack-allocated buffer
+		var buf [batchSize]entry[K, V]
+		bufLen := 0
 
 		for i := range sm.shards {
 			s := &sm.shards[i]
 
 			s.rw.RLock()
 			for k, v := range s.m {
-				buf = append(buf, entry[K, V]{key: k, value: v})
-				if len(buf) == rangeBatchSize {
+				buf[bufLen] = entry[K, V]{key: k, value: v} //nolint:gosec // G602 slice index not out of range
+				bufLen++
+				if bufLen == batchSize {
 					s.rw.RUnlock()
-					for j := range buf {
+					for j := range bufLen {
 						if !yield(buf[j].key, buf[j].value) {
 							return
 						}
 					}
-					buf = buf[:0]
+					bufLen = 0
 					s.rw.RLock()
 				}
 			}
 			s.rw.RUnlock()
 
-			for j := range buf {
+			for j := range bufLen {
 				if !yield(buf[j].key, buf[j].value) {
 					return
 				}
 			}
-			buf = buf[:0]
+			bufLen = 0
 		}
 	}
 }
@@ -381,6 +387,10 @@ func (sm *Map[K, V]) Empty() bool {
 
 // DeleteMany deletes each key in keys from the map.
 func (sm *Map[K, V]) DeleteMany(keys []K) {
+	// 8192 * 16 ([shardIndex] size) = 128 KiB on 64-bit platforms.
+	// Exceeding this value may trigger a heap allocation.
+	const batchSize = 1 << 13
+
 	if len(keys) == 0 {
 		return
 	}
@@ -392,25 +402,28 @@ func (sm *Map[K, V]) DeleteMany(keys []K) {
 		return
 	}
 
-	p := sm.fillSortedBatch(keys)
-	defer releaseShardIndexSlice(p)
+	var buf [batchSize]shardIndex
 
-	buf := *p
-	for i := 0; i < len(buf); {
-		j := i + 1
-		shardID := buf[i].shard
-		for j < len(buf) && buf[j].shard == shardID {
-			j++
+	for chunk := range slices.Chunk(keys, batchSize) {
+		batch := buf[:len(chunk)]
+		sm.fillSorted(batch, chunk)
+
+		for i := 0; i < len(batch); {
+			j := i + 1
+			shardID := batch[i].shard
+			for j < len(batch) && batch[j].shard == shardID {
+				j++
+			}
+
+			s := &sm.shards[shardID]
+			s.rw.Lock()
+			for k := i; k < j; k++ {
+				delete(s.m, chunk[batch[k].index])
+			}
+			s.rw.Unlock()
+
+			i = j
 		}
-
-		s := &sm.shards[shardID]
-		s.rw.Lock()
-		for _, item := range buf[i:j] {
-			delete(s.m, keys[item.index])
-		}
-		s.rw.Unlock()
-
-		i = j
 	}
 }
 
@@ -418,6 +431,11 @@ func (sm *Map[K, V]) DeleteMany(keys []K) {
 // each key/value pair that was present.
 // The function f is called after the key's shard lock is released.
 func (sm *Map[K, V]) LoadAndDeleteMany(keys []K, f func(K, V)) {
+	// 2048 * 16 ([shardIndex] size) = 32 KiB on 64-bit platforms.
+	// 2048 * sizeof(entry[K,V]) = 128 KiB for entries up to 64 B -
+	// safe for all primitives and most struct value types.
+	const batchSize = 1 << 11
+
 	if len(keys) == 0 {
 		return
 	}
@@ -426,36 +444,48 @@ func (sm *Map[K, V]) LoadAndDeleteMany(keys []K, f func(K, V)) {
 		panic("goshard: nil func")
 	}
 
-	p := sm.fillSortedBatch(keys)
-	defer releaseShardIndexSlice(p)
-
-	buf := *p
-	var removed []entry[K, V]
-
-	for i := 0; i < len(buf); {
-		j := i + 1
-		shardID := buf[i].shard
-		for j < len(buf) && buf[j].shard == shardID {
-			j++
-		}
-
-		s := &sm.shards[shardID]
-		s.rw.Lock()
-		removed = removed[:0]
-		for _, item := range buf[i:j] {
-			key := keys[item.index]
-			if value, ok := s.m[key]; ok {
-				removed = append(removed, entry[K, V]{key: key, value: value})
-				delete(s.m, key)
+	if len(keys) <= 10 {
+		for _, key := range keys {
+			if value, ok := sm.LoadAndDelete(key); ok {
+				f(key, value)
 			}
 		}
-		s.rw.Unlock()
+		return
+	}
 
-		for idx := range removed {
-			f(removed[idx].key, removed[idx].value)
+	var buf [batchSize]shardIndex
+	var removedBuf [batchSize]entry[K, V]
+
+	for chunk := range slices.Chunk(keys, batchSize) {
+		batch := buf[:len(chunk)]
+		sm.fillSorted(batch, chunk)
+
+		for i := 0; i < len(batch); {
+			j := i + 1
+			shardID := batch[i].shard
+			for j < len(batch) && batch[j].shard == shardID {
+				j++
+			}
+
+			s := &sm.shards[shardID]
+			s.rw.Lock()
+			removedLen := 0
+			for k := i; k < j; k++ {
+				key := chunk[batch[k].index]
+				if value, ok := s.m[key]; ok {
+					removedBuf[removedLen] = entry[K, V]{key: key, value: value}
+					removedLen++
+					delete(s.m, key)
+				}
+			}
+			s.rw.Unlock()
+
+			for k := range removedLen {
+				f(removedBuf[k].key, removedBuf[k].value)
+			}
+
+			i = j
 		}
-
-		i = j
 	}
 }
 
@@ -475,7 +505,6 @@ func (sm *Map[K, V]) Compute(key K, f func(key K, current V, loaded bool) (next 
 	current, loaded := s.m[key]
 	next, keep := f(key, current, loaded)
 	if keep {
-		s.init()
 		s.m[key] = next
 		value = next
 	} else {
@@ -564,10 +593,11 @@ func (sm *Map[K, V]) GobDecode(bs []byte) error {
 
 			s := &sm.shards[idx]
 			s.rw.Lock()
-			if s.m == nil {
-				s.m = make(map[K]V, len(group))
+			if len(s.m) == 0 {
+				s.m = group
+			} else {
+				maps.Copy(s.m, group)
 			}
-			maps.Copy(s.m, group)
 			s.rw.Unlock()
 		}
 	}

@@ -16,7 +16,7 @@ func prepareKeys(b *testing.B) []int {
 
 	keys := make([]int, max(b.N, 1_000_000))
 	for i := range keys {
-		keys[i] = int(i)
+		keys[i] = i
 	}
 
 	r := rand.New(rand.NewSource(42))
@@ -25,79 +25,62 @@ func prepareKeys(b *testing.B) []int {
 	return keys
 }
 
+// BenchmarkWriteReadDeleteCycle measures the combined cost of Store + Load +
+// Delete in a single goroutine iteration. Operations are sequential within
+// each worker; parallelism comes solely from b.RunParallel.
+// This avoids the goroutine-scheduling and closure-allocation noise that
+// nested `go func()` launches would introduce into the measurement.
 func BenchmarkWriteReadDeleteCycle(b *testing.B) {
 	keys := prepareKeys(b)
 
 	b.Run("goshardMap", func(b *testing.B) {
 		var m goshard.Map[int, int]
-
+		b.ResetTimer()
 		b.RunParallel(func(pb *testing.PB) {
 			i := 0
-
 			for pb.Next() {
-				idx := i % len(keys)
-				key := keys[idx]
+				key := keys[i%len(keys)]
 				i++
-
 				m.Store(key, key)
-				go func() {
-					_, _ = m.Load(key)
-					go func() {
-						m.Delete(key)
-					}()
-				}()
+				_, _ = m.Load(key)
+				m.Delete(key)
 			}
 		})
 	})
 
 	b.Run("syncMap", func(b *testing.B) {
 		var m sync.Map
-
+		b.ResetTimer()
 		b.RunParallel(func(pb *testing.PB) {
 			i := 0
-
 			for pb.Next() {
-				idx := i % len(keys)
-				key := keys[idx]
+				key := keys[i%len(keys)]
 				i++
-
 				m.Store(key, key)
-				go func() {
-					_, _ = m.Load(key)
-					go func() {
-						m.Delete(key)
-					}()
-				}()
+				_, _ = m.Load(key)
+				m.Delete(key)
 			}
 		})
 	})
 
 	b.Run("mutexMap", func(b *testing.B) {
-		var m = make(map[int]int)
-		var rw = sync.RWMutex{}
-
+		m := make(map[int]int)
+		var rw sync.RWMutex
+		b.ResetTimer()
 		b.RunParallel(func(pb *testing.PB) {
 			i := 0
-
 			for pb.Next() {
-				idx := i % len(keys)
-				key := keys[idx]
+				key := keys[i%len(keys)]
 				i++
-
 				rw.Lock()
 				m[key] = key
 				rw.Unlock()
-
-				go func() {
-					rw.RLock()
-					_, _ = m[key] //nolint:staticcheck
-					rw.RUnlock()
-					go func() {
-						rw.Lock()
-						delete(m, key)
-						rw.Unlock()
-					}()
-				}()
+				rw.RLock()
+				_ = m[key]
+				rw.RUnlock()
+				rw.Lock()
+				delete(m, key)
+				rw.Unlock()
 			}
 		})
 	})
@@ -164,6 +147,8 @@ func BenchmarkDeleteManyParallel(b *testing.B) {
 	for _, count := range counts {
 		b.Run(fmt.Sprintf("Loop/n=%d", count), func(b *testing.B) {
 			m := goshard.NewMap[int, int](0)
+			b.ResetTimer()
+
 			b.RunParallel(func(pb *testing.PB) {
 				for pb.Next() {
 					for _, k := range keys[:count] {
@@ -175,6 +160,8 @@ func BenchmarkDeleteManyParallel(b *testing.B) {
 
 		b.Run(fmt.Sprintf("DeleteMany/n=%d", count), func(b *testing.B) {
 			m := goshard.NewMap[int, int](0)
+			b.ResetTimer()
+
 			b.RunParallel(func(pb *testing.PB) {
 				for pb.Next() {
 					m.DeleteMany(keys[:count])
@@ -188,11 +175,10 @@ func BenchmarkRangeParallel(b *testing.B) {
 	for _, count := range counts {
 		b.Run(fmt.Sprintf("goshardMap/n=%d", count), func(b *testing.B) {
 			var m goshard.Map[int, int]
-
 			for i := range count {
 				m.Store(i, i)
 			}
-
+			b.ResetTimer()
 			b.RunParallel(func(pb *testing.PB) {
 				i := 0
 
@@ -209,11 +195,10 @@ func BenchmarkRangeParallel(b *testing.B) {
 
 		b.Run(fmt.Sprintf("syncMap/n=%d", count), func(b *testing.B) {
 			var m sync.Map
-
 			for i := range count {
 				m.Store(i, i)
 			}
-
+			b.ResetTimer()
 			b.RunParallel(func(pb *testing.PB) {
 				i := 0
 

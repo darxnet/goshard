@@ -20,6 +20,11 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      - name: Verify go mod tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
       - name: Run Tests
         run: go test -race -failfast -coverprofile=coverage.out ./...
 
