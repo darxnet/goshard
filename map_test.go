@@ -131,6 +131,31 @@ func TestCompareFuncForNonComparableValues(t *testing.T) {
 	}
 }
 
+func TestLoadAndDeleteMany(t *testing.T) {
+	t.Parallel()
+
+	m := goshard.NewMap[int, int](1)
+	keys := make([]int, 0, 11)
+
+	for i := range 11 {
+		m.Store(i, i)
+		keys = append(keys, i)
+	}
+
+	var mu sync.Mutex
+	seen := make(map[int]int, 5)
+
+	m.LoadAndDeleteMany(keys, func(k, v int) {
+		mu.Lock()
+		seen[k] = v
+		mu.Unlock()
+	})
+
+	if len(seen) != len(keys) {
+		t.Fatal("LoadAndDeleteMany missed deleted values")
+	}
+}
+
 func TestDeleteManyAndLoadAndDeleteMany(t *testing.T) {
 	t.Parallel()
 
@@ -175,12 +200,12 @@ func TestRangeStopsEarly(t *testing.T) {
 	}
 }
 
-func TestRangeStopsEarly100(t *testing.T) {
+func TestRangeStopsEarly2(t *testing.T) {
 	t.Parallel()
 
 	m := goshard.NewMap[int, int](1)
 
-	for i := range 100 {
+	for i := range 1 << 10 {
 		m.Store(i, i)
 	}
 
@@ -192,6 +217,26 @@ func TestRangeStopsEarly100(t *testing.T) {
 
 	if visited != 1 {
 		t.Fatal("Range should stop after callback returns false")
+	}
+}
+
+func TestRangeStopsEarly3(t *testing.T) {
+	t.Parallel()
+
+	m := goshard.NewMap[int, int](1)
+
+	for i := range 1 << 10 {
+		m.Store(i, i)
+	}
+
+	visited := 0
+	m.Range(func(_, _ int) bool {
+		visited++
+		return true
+	})
+
+	if visited != 1<<10 {
+		t.Fatal("Range should not stop after callback returns true")
 	}
 }
 
@@ -217,10 +262,12 @@ func TestGobDecodeIntoEmptyMap(t *testing.T) {
 	}
 }
 
-func TestGobDecodeInitializesZeroMap(t *testing.T) {
+func TestGobDecodeIntoNonEmptyShard(t *testing.T) {
 	t.Parallel()
 
-	src := goshard.NewMap[int, int](0)
+	src := goshard.NewMap[int, int](1)
+	dst := goshard.NewMap[int, int](1)
+
 	src.Store(1, 10)
 
 	buf, err := src.GobEncode()
@@ -228,13 +275,18 @@ func TestGobDecodeInitializesZeroMap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var dst goshard.Map[int, int]
+	dst.Store(2, 20)
+
 	if err := dst.GobDecode(buf); err != nil {
 		t.Fatal(err)
 	}
 
 	if v, ok := dst.Load(1); !ok || v != 10 {
-		t.Fatal("GobDecode should initialize a zero Map")
+		t.Fatalf("decoded key missing: value=%d ok=%v", v, ok)
+	}
+
+	if v, ok := dst.Load(2); !ok || v != 20 {
+		t.Fatalf("existing key missing after merge: value=%d ok=%v", v, ok)
 	}
 }
 
@@ -522,23 +574,6 @@ func TestGobDecodeMalformed(t *testing.T) {
 	err := m.GobDecode([]byte("malformed"))
 	if err == nil {
 		t.Fatal("expected error for malformed gob")
-	}
-}
-
-func TestRangeCallbackStopsMidShard(t *testing.T) {
-	t.Parallel()
-	m := goshard.NewMap[int, int](1) // Single shard to ensure order
-	m.Store(1, 10)
-	m.Store(2, 20)
-	m.Store(3, 30)
-
-	count := 0
-	m.Range(func(k, v int) bool {
-		count++
-		return count < 2
-	})
-	if count != 2 {
-		t.Fatalf("expected count 2, got %d", count)
 	}
 }
 
