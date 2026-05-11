@@ -28,6 +28,7 @@ linters:
     - containedctx
     - cyclop
     - depguard
+    - err113
     - exhaustruct
     - forcetypeassert
     - funcorder
