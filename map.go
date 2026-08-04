@@ -119,7 +119,13 @@ func NewMap[K comparable, V any](n int) *Map[K, V] {
 // If n is zero, NewComparableMap chooses a concurrency-oriented default;
 // otherwise n is rounded up to the next power of two.
 func NewComparableMap[K comparable, V comparable](n int) *ComparableMap[K, V] {
-	return &ComparableMap[K, V]{Map: *NewMap[K, V](n)}
+	if n < 0 {
+		panic("goshard: negative shard count")
+	}
+
+	sm := new(ComparableMap[K, V])
+	sm.init(n)
+	return sm
 }
 
 func (sm *Map[K, V]) idx(key K) uint64 {

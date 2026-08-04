@@ -32,6 +32,20 @@ func TestNewComparableMap(t *testing.T) {
 	if m == nil {
 		t.Fatal("NewComparableMap returned nil")
 	}
+	m.Store(1, 1)
+	if value, ok := m.Load(1); !ok || value != 1 {
+		t.Fatal("NewComparableMap returned an unusable map")
+	}
+}
+
+func TestNewComparableMapPanicsOnNegativeShardCount(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for negative shard count")
+		}
+	}()
+	_ = goshard.NewComparableMap[int, int](-1)
 }
 
 func TestBasicLoadStoreAcrossKeyTypes(t *testing.T) {
