@@ -170,6 +170,38 @@ func TestLoadAndDeleteMany(t *testing.T) {
 	}
 }
 
+func TestManyKeysInOneShard(t *testing.T) {
+	t.Parallel()
+
+	// With one shard all 1000 keys land in it. That is more than the
+	// removed buffer of LoadAndDeleteMany holds, so the shard is processed
+	// in several rounds.
+	m := goshard.NewMap[int, int](1)
+	keys := make([]int, 1000)
+	for i := range keys {
+		keys[i] = i
+		m.Store(i, i*10)
+	}
+
+	seen := make(map[int]int, len(keys))
+	m.LoadAndDeleteMany(keys[:500], func(k, v int) {
+		seen[k] = v
+	})
+	if len(seen) != 500 {
+		t.Fatalf("LoadAndDeleteMany reported %d keys, want 500", len(seen))
+	}
+	for k, v := range seen {
+		if v != k*10 {
+			t.Fatalf("unexpected value %d for key %d", v, k)
+		}
+	}
+
+	m.DeleteMany(keys[500:])
+	if !m.Empty() {
+		t.Fatalf("map should be empty, got %d entries", m.Len())
+	}
+}
+
 func TestDeleteManyAndLoadAndDeleteMany(t *testing.T) {
 	t.Parallel()
 
@@ -559,6 +591,37 @@ func TestZeroMapLenRange(t *testing.T) {
 		t.Fatal("range should not execute on zero map")
 		return true
 	})
+}
+
+func TestZeroMapDeleteMany(t *testing.T) {
+	t.Parallel()
+	var m goshard.Map[int, int]
+	m.LoadAndDeleteMany(nil, nil) // no keys: returns before checking f
+	m.DeleteMany([]int{1, 2, 3})
+	m.LoadAndDeleteMany([]int{1, 2, 3}, func(int, int) {
+		t.Fatal("zero map has nothing to delete")
+	})
+	if !m.Empty() {
+		t.Fatal("zero map should stay empty")
+	}
+}
+
+func TestAllCreatedBeforeInit(t *testing.T) {
+	t.Parallel()
+	var m goshard.Map[int, int]
+	seq := m.All()
+	m.Store(1, 10)
+
+	n := 0
+	for k, v := range seq {
+		if k != 1 || v != 10 {
+			t.Fatalf("unexpected entry %d=%d", k, v)
+		}
+		n++
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 entry, got %d", n)
+	}
 }
 
 func TestDoubleInit(t *testing.T) {

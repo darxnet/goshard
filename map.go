@@ -8,13 +8,11 @@ package goshard
 
 import (
 	"bytes"
-	"cmp"
 	"encoding/gob"
 	"errors"
 	"hash/maphash"
 	"io"
 	"iter"
-	"maps"
 	"math/bits"
 	"runtime"
 	"slices"
@@ -32,11 +30,6 @@ const (
 type entry[K comparable, V any] struct {
 	key   K
 	value V
-}
-
-type shardIndex struct {
-	shard uint64
-	index int
 }
 
 type shard[K comparable, V any] struct {
@@ -137,22 +130,19 @@ func (sm *Map[K, V]) shard(key K) *shard[K, V] {
 	return &sm.shards[sm.idx(key)]
 }
 
-func (sm *Map[K, V]) fillSorted(dst []shardIndex, keys []K) {
-	sm.init(0)
+// fillSorted fills dst with one number per key: the shard index in the high
+// 32 bits and the position in keys in the low 32 bits. Sorting dst then puts
+// keys of the same shard next to each other.
+// keys must hold fewer than 1<<32 elements and the map must be initialized.
+func (sm *Map[K, V]) fillSorted(dst []uint64, keys []K) {
 	if len(dst) != len(keys) {
 		panic("dst and keys must have the same length")
 	}
 
 	for i, key := range keys {
-		dst[i] = shardIndex{
-			index: i,
-			shard: sm.idx(key),
-		}
+		dst[i] = sm.idx(key)<<32 | uint64(i)
 	}
-
-	slices.SortFunc(dst, func(a, b shardIndex) int {
-		return cmp.Compare(a.shard, b.shard)
-	})
+	slices.Sort(dst)
 }
 
 // Load returns the value stored in the map for a key, or the zero value if no
@@ -296,41 +286,52 @@ func (sm *ComparableMap[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 // does not block other methods on the receiver; even yield itself may call any
 // method on the Map.
 func (sm *Map[K, V]) All() iter.Seq2[K, V] {
-	sm.init(0)
 	return func(yield func(key K, value V) bool) {
-		// batchSize is a common batch size for dynamic value sizes
-		const batchSize = 1 << 10
+		sm.iterate(yield)
+	}
+}
 
-		// stack-allocated buffer
-		var buf [batchSize]entry[K, V]
-		bufLen := 0
+// iterBatch is how many entries iterate and LoadAndDeleteMany copy out of a
+// shard before releasing its lock.
+//
+// The buffer is a fixed-size array, and Go keeps such arrays on the stack
+// only up to 128 KiB. With 256 entries the buffer stays on the stack as long
+// as one entry (key + value) is at most 512 B. Bigger entries move the buffer
+// to the heap, which costs one allocation per call.
+const iterBatch = 256
 
-		for i := range sm.shards {
-			s := &sm.shards[i]
+func (sm *Map[K, V]) iterate(yield func(key K, value V) bool) {
+	if sm.inited.Load() == 0 {
+		return
+	}
 
-			s.rw.RLock()
-			for k, v := range s.m {
-				buf[bufLen] = entry[K, V]{key: k, value: v} //nolint:gosec // G602 slice index not out of range
-				bufLen++
-				if bufLen == batchSize {
-					s.rw.RUnlock()
-					for j := range bufLen {
-						if !yield(buf[j].key, buf[j].value) {
-							return
-						}
+	var buf [iterBatch]entry[K, V]
+
+	for i := range sm.shards {
+		s := &sm.shards[i]
+
+		n := 0
+		s.rw.RLock()
+		for k, v := range s.m {
+			buf[n] = entry[K, V]{key: k, value: v} //nolint:gosec // G602 slice index not out of range
+			n++
+			if n == len(buf) {
+				s.rw.RUnlock()
+				for j := range n {
+					if !yield(buf[j].key, buf[j].value) {
+						return
 					}
-					bufLen = 0
-					s.rw.RLock()
 				}
+				n = 0
+				s.rw.RLock()
 			}
-			s.rw.RUnlock()
+		}
+		s.rw.RUnlock()
 
-			for j := range bufLen {
-				if !yield(buf[j].key, buf[j].value) {
-					return
-				}
+		for j := range n {
+			if !yield(buf[j].key, buf[j].value) {
+				return
 			}
-			bufLen = 0
 		}
 	}
 }
@@ -340,7 +341,7 @@ func (sm *Map[K, V]) All() iter.Seq2[K, V] {
 //
 // This exists for compatibility with sync.Map; All should be preferred.
 func (sm *Map[K, V]) Range(yield func(K, V) bool) {
-	sm.All()(yield)
+	sm.iterate(yield)
 }
 
 // Clear deletes all entries from the map.
@@ -391,44 +392,48 @@ func (sm *Map[K, V]) Empty() bool {
 	return true
 }
 
+// keyBatch is how many keys DeleteMany and LoadAndDeleteMany sort at once.
+// The sort buffer takes 1024 * 8 B = 8 KiB of stack.
+const keyBatch = 1 << 10
+
+// fewKeys reports whether n keys should be deleted one by one instead of
+// sorting them by shard first. Sorting helps only when several keys land in
+// the same shard, so that one lock covers all of them. With more shards that
+// happens less often, so the limit grows with the shard count.
+// The numbers come from BenchmarkDeleteManyThreshold.
+// The map must be initialized.
+func (sm *Map[K, V]) fewKeys(n int) bool {
+	return n <= max(8, len(sm.shards)/4)
+}
+
 // DeleteMany deletes each key in keys from the map.
 func (sm *Map[K, V]) DeleteMany(keys []K) {
-	// 8192 * 16 ([shardIndex] size) = 128 KiB on 64-bit platforms.
-	// Exceeding this value may trigger a heap allocation.
-	const batchSize = 1 << 13
-
-	if len(keys) == 0 {
+	if len(keys) == 0 || sm.inited.Load() == 0 {
 		return
 	}
 
-	if len(keys) <= 10 {
+	if sm.fewKeys(len(keys)) {
 		for _, key := range keys {
 			sm.Delete(key)
 		}
 		return
 	}
 
-	var buf [batchSize]shardIndex
+	var buf [keyBatch]uint64
 
-	for chunk := range slices.Chunk(keys, batchSize) {
+	for off := 0; off < len(keys); off += keyBatch {
+		chunk := keys[off:min(off+keyBatch, len(keys))]
 		batch := buf[:len(chunk)]
 		sm.fillSorted(batch, chunk)
 
 		for i := 0; i < len(batch); {
-			j := i + 1
-			shardID := batch[i].shard
-			for j < len(batch) && batch[j].shard == shardID {
-				j++
-			}
-
+			shardID := batch[i] >> 32
 			s := &sm.shards[shardID]
 			s.rw.Lock()
-			for k := i; k < j; k++ {
-				delete(s.m, chunk[batch[k].index])
+			for ; i < len(batch) && batch[i]>>32 == shardID; i++ {
+				delete(s.m, chunk[uint32(batch[i])]) //nolint:gosec // G115 low 32 bits hold the chunk index
 			}
 			s.rw.Unlock()
-
-			i = j
 		}
 	}
 }
@@ -437,11 +442,6 @@ func (sm *Map[K, V]) DeleteMany(keys []K) {
 // each key/value pair that was present.
 // The function f is called after the key's shard lock is released.
 func (sm *Map[K, V]) LoadAndDeleteMany(keys []K, f func(K, V)) {
-	// 2048 * 16 ([shardIndex] size) = 32 KiB on 64-bit platforms.
-	// 2048 * sizeof(entry[K,V]) = 128 KiB for entries up to 64 B -
-	// safe for all primitives and most struct value types.
-	const batchSize = 1 << 11
-
 	if len(keys) == 0 {
 		return
 	}
@@ -450,7 +450,11 @@ func (sm *Map[K, V]) LoadAndDeleteMany(keys []K, f func(K, V)) {
 		panic("goshard: nil func")
 	}
 
-	if len(keys) <= 10 {
+	if sm.inited.Load() == 0 {
+		return
+	}
+
+	if sm.fewKeys(len(keys)) {
 		for _, key := range keys {
 			if value, ok := sm.LoadAndDelete(key); ok {
 				f(key, value)
@@ -459,38 +463,32 @@ func (sm *Map[K, V]) LoadAndDeleteMany(keys []K, f func(K, V)) {
 		return
 	}
 
-	var buf [batchSize]shardIndex
-	var removedBuf [batchSize]entry[K, V]
+	var buf [keyBatch]uint64
+	var removed [iterBatch]entry[K, V]
 
-	for chunk := range slices.Chunk(keys, batchSize) {
+	for off := 0; off < len(keys); off += keyBatch {
+		chunk := keys[off:min(off+keyBatch, len(keys))]
 		batch := buf[:len(chunk)]
 		sm.fillSorted(batch, chunk)
 
 		for i := 0; i < len(batch); {
-			j := i + 1
-			shardID := batch[i].shard
-			for j < len(batch) && batch[j].shard == shardID {
-				j++
-			}
-
+			shardID := batch[i] >> 32
 			s := &sm.shards[shardID]
+			n := 0
 			s.rw.Lock()
-			removedLen := 0
-			for k := i; k < j; k++ {
-				key := chunk[batch[k].index]
+			for ; i < len(batch) && batch[i]>>32 == shardID && n < len(removed); i++ {
+				key := chunk[uint32(batch[i])] //nolint:gosec // G115 low 32 bits hold the chunk index
 				if value, ok := s.m[key]; ok {
-					removedBuf[removedLen] = entry[K, V]{key: key, value: value}
-					removedLen++
+					removed[n] = entry[K, V]{key: key, value: value}
+					n++
 					delete(s.m, key)
 				}
 			}
 			s.rw.Unlock()
 
-			for k := range removedLen {
-				f(removedBuf[k].key, removedBuf[k].value)
+			for j := range n {
+				f(removed[j].key, removed[j].value)
 			}
-
-			i = j
 		}
 	}
 }
@@ -559,12 +557,23 @@ func (sm *Map[K, V]) GobDecode(bs []byte) error {
 	sm.init(0)
 	dec := gob.NewDecoder(bytes.NewReader(bs))
 
-	groups := make([]map[K]V, len(sm.shards))
-	counts := make([]int, len(sm.shards))
+	// Each encoded map is one shard of the source map, and its keys spread
+	// over all shards of this map. Instead of building a temporary map per
+	// shard, the keys are sorted by shard and written in groups under one
+	// lock each.
+	//
+	// decoded, keys, values and order are reused for every encoded map.
+	// gob adds entries to an existing map instead of making a new one, so
+	// decoded is cleared before each Decode.
+	var (
+		decoded map[K]V
+		keys    []K
+		values  []V
+		order   []uint64
+	)
 
 	for {
-		var decoded map[K]V
-
+		clear(decoded)
 		if err := dec.Decode(&decoded); err != nil {
 			if errors.Is(err, io.EOF) {
 				break
@@ -572,37 +581,22 @@ func (sm *Map[K, V]) GobDecode(bs []byte) error {
 			return err
 		}
 
-		clear(groups)
-		clear(counts)
-
-		// Count keys per destination shard to pre-size intermediate maps,
-		// avoiding incremental growth during the second pass.
-		for key := range decoded {
-			counts[sm.idx(key)]++
-		}
-
-		for idx, count := range counts {
-			if count != 0 {
-				groups[idx] = make(map[K]V, count)
-			}
-		}
-
+		keys, values = keys[:0], values[:0]
 		for key, value := range decoded {
-			idx := sm.idx(key)
-			groups[idx][key] = value
+			keys = append(keys, key)
+			values = append(values, value)
 		}
 
-		for idx, group := range groups {
-			if group == nil {
-				continue
-			}
+		order = slices.Grow(order[:0], len(keys))[:len(keys)]
+		sm.fillSorted(order, keys)
 
-			s := &sm.shards[idx]
+		for i := 0; i < len(order); {
+			shardID := order[i] >> 32
+			s := &sm.shards[shardID]
 			s.rw.Lock()
-			if len(s.m) == 0 {
-				s.m = group
-			} else {
-				maps.Copy(s.m, group)
+			for ; i < len(order) && order[i]>>32 == shardID; i++ {
+				j := uint32(order[i]) //nolint:gosec // G115 low 32 bits hold the key index
+				s.m[keys[j]] = values[j]
 			}
 			s.rw.Unlock()
 		}

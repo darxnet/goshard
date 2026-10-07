@@ -24,5 +24,5 @@ func TestFillSortedPanicsOnMismatchedLengths(t *testing.T) {
 		}
 	}()
 
-	m.fillSorted(make([]shardIndex, 1), []int{1, 2})
+	m.fillSorted(make([]uint64, 1), []int{1, 2})
 }
