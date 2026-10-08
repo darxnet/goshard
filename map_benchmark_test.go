@@ -171,18 +171,6 @@ func BenchmarkDeleteManyParallel(b *testing.B) {
 	}
 }
 
-// Values of different sizes. The batch buffers in All and LoadAndDeleteMany
-// stay on the stack only while 256 entries fit into 128 KiB, that is while
-// one entry is at most 512 B. With int keys value504 is the largest value
-// that still fits; value512 is the first one that does not.
-type (
-	value8   int64
-	value128 [16]int64
-	value504 [63]int64
-	value512 [64]int64
-	value1k  [128]int64
-)
-
 func benchmarkValueSize[V any](b *testing.B, size string) {
 	b.Helper()
 
@@ -220,10 +208,12 @@ func benchmarkValueSize[V any](b *testing.B, size string) {
 
 func BenchmarkValueSize(b *testing.B) {
 	benchmarkValueSize[value8](b, "8B")
+	benchmarkValueSize[value48](b, "48B")
 	benchmarkValueSize[value128](b, "128B")
 	benchmarkValueSize[value504](b, "504B")
 	benchmarkValueSize[value512](b, "512B")
 	benchmarkValueSize[value1k](b, "1KiB")
+	benchmarkValueSize[value8k](b, "8KiB")
 }
 
 // BenchmarkDeleteManyFreshGoroutine runs every call in a new goroutine, like

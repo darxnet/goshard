@@ -32,14 +32,30 @@ Standard `sync.Map` is excellent for read-heavy workloads with stable keys. Howe
 - **Cache-Line Padding** — Prevents "false sharing" by ensuring shard locks don't collide on the same CPU cache line.
 - **Shard-aware Batching** — `DeleteMany` and `LoadAndDeleteMany` pre-sort keys to process entire groups under a single lock acquisition per shard.
 - **Atomic Compute** — Perform complex read-modify-write logic atomically within a single shard lock.
-- **Go 1.23+ Ready** — Native support for `for range` iterators via `All()`.
+- **Go 1.24+** — Native `for range` iteration via `All()`.
 - **Serialization** — Built-in `GobEncode` and `GobDecode` for easy persistence or network transfer.
+- **Zero Dependencies** — Only the standard library.
+- **`purego` Build Tag** — Builds without `unsafe` when needed.
 
 ## Installation
 
 ```bash
 go get github.com/darxnet/goshard
 ```
+
+### Building without `unsafe`
+
+The default build uses `unsafe.Sizeof` (and nothing else from `unsafe`) to size the
+batch buffers of `All`, `Range` and `LoadAndDeleteMany` for the value type, so they
+stay on the stack for values of any size. If your project forbids `unsafe`, build
+with the `purego` tag:
+
+```bash
+go build -tags purego ./...
+```
+
+With `purego` the buffers hold 256 entries and stay on the stack for entries
+(key + value) up to 512 B; larger values cost one heap allocation per call.
 
 ## Quick Start
 

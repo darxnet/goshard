@@ -18,8 +18,6 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
-
-	"golang.org/x/sys/cpu"
 )
 
 const (
@@ -32,11 +30,16 @@ type entry[K comparable, V any] struct {
 	value V
 }
 
+// cacheLinePad keeps every shard on its own cache lines so that writes to
+// one shard do not slow down readers of its neighbours. cacheLineSize is set
+// per architecture in the cacheline_*.go files.
+type cacheLinePad struct{ _ [cacheLineSize]byte }
+
 type shard[K comparable, V any] struct {
-	_  cpu.CacheLinePad
+	_  cacheLinePad
 	m  map[K]V
 	rw sync.RWMutex
-	_  cpu.CacheLinePad
+	_  cacheLinePad
 }
 
 // Map is a concurrent-safe sharded map optimized for reduced lock contention
@@ -291,29 +294,25 @@ func (sm *Map[K, V]) All() iter.Seq2[K, V] {
 	}
 }
 
-// iterBatch is how many entries iterate and LoadAndDeleteMany copy out of a
-// shard before releasing its lock.
-//
-// The buffer is a fixed-size array, and Go keeps such arrays on the stack
-// only up to 128 KiB. With 256 entries the buffer stays on the stack as long
-// as one entry (key + value) is at most 512 B. Bigger entries move the buffer
-// to the heap, which costs one allocation per call.
-const iterBatch = 256
-
 func (sm *Map[K, V]) iterate(yield func(key K, value V) bool) {
 	if sm.inited.Load() == 0 {
 		return
 	}
 
-	var buf [iterBatch]entry[K, V]
+	sm.iterateBatched(yield)
+}
 
+// iterateBuf walks all shards. It copies up to len(buf) entries out of a
+// shard, releases the shard lock and only then calls yield for them, so
+// yield never runs under a lock.
+func (sm *Map[K, V]) iterateBuf(buf []entry[K, V], yield func(key K, value V) bool) {
 	for i := range sm.shards {
 		s := &sm.shards[i]
 
 		n := 0
 		s.rw.RLock()
 		for k, v := range s.m {
-			buf[n] = entry[K, V]{key: k, value: v} //nolint:gosec // G602 slice index not out of range
+			buf[n] = entry[K, V]{key: k, value: v}
 			n++
 			if n == len(buf) {
 				s.rw.RUnlock()
@@ -463,8 +462,15 @@ func (sm *Map[K, V]) LoadAndDeleteMany(keys []K, f func(K, V)) {
 		return
 	}
 
+	sm.loadAndDeleteManyBatched(keys, f)
+}
+
+// loadAndDeleteManyBuf is LoadAndDeleteMany after the argument checks.
+// Deleted entries are collected in removed while the shard is locked and
+// handed to f after the lock is released; when removed fills up, the shard
+// is processed in several rounds.
+func (sm *Map[K, V]) loadAndDeleteManyBuf(keys []K, f func(K, V), removed []entry[K, V]) {
 	var buf [keyBatch]uint64
-	var removed [iterBatch]entry[K, V]
 
 	for off := 0; off < len(keys); off += keyBatch {
 		chunk := keys[off:min(off+keyBatch, len(keys))]

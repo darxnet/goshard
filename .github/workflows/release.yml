@@ -23,15 +23,24 @@ jobs:
       - name: Verify go mod tidy
         run: |
           go mod tidy
-          git diff --exit-code go.mod go.sum
+          git diff --exit-code -- go.mod go.sum
 
       - name: Run Tests
         run: go test -race -failfast -coverprofile=coverage.out ./...
+
+      - name: Run Tests (purego)
+        run: go test -race -failfast -tags purego ./...
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
+
+      - name: Run golangci-lint (purego)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          args: --build-tags purego
 
       - name: Verify Coverage
         run: |
