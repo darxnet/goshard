@@ -30,12 +30,14 @@ linters:
     - depguard
     - err113
     - exhaustruct
+    - exhaustruct_v5
     - forcetypeassert
     - funcorder
     - funlen
     - gochecknoglobals
     - goconst
     - godox
+    - gomodguard
     - ireturn
     - mnd
     - nestif
