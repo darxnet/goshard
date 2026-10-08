@@ -2,7 +2,7 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/darxnet/goshard.svg)](https://pkg.go.dev/github.com/darxnet/goshard)
 [![Go](https://github.com/darxnet/goshard/actions/workflows/release.yml/badge.svg)](https://github.com/darxnet/goshard/actions/workflows/release.yml)
-![Coverage](https://img.shields.io/badge/Coverage-100%25-brightgreen)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/darxnet/goshard/badges/coverage.json)](https://github.com/darxnet/goshard/actions/workflows/release.yml)
 
 `goshard` is a high-performance, concurrent-safe sharded map for Go. 
 It is engineered for **1M+ RPS workloads** where minimizing GC pressure and lock contention is critical for system stability.
@@ -25,6 +25,15 @@ Standard `sync.Map` is excellent for read-heavy workloads with stable keys. Howe
 | **Batch Deletion** | **Shard-aware Batching** | Sequential |
 | **GC Pressure** | Extremely Low | High at scale |
 | **Read Performance** | Fast (RLock) | **Extremely Fast (Lock-free)** |
+
+## When to use it
+
+`goshard` is for maps that are **written as often as they are read**: counters,
+rate limiters, sessions with TTL, anything with frequent `Store`/`Delete` churn.
+
+For maps that are **read far more often than written** (catalogs, registries,
+caches that warm up and then stay) use [gosync](https://github.com/darxnet/gosync):
+the generic hash-trie behind `sync.Map`, with lock-free, allocation-free loads.
 
 ## Features
 
