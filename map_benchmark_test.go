@@ -229,7 +229,11 @@ func BenchmarkDeleteManyFreshGoroutine(b *testing.B) {
 	b.ReportAllocs()
 	var wg sync.WaitGroup
 	for b.Loop() {
-		wg.Go(func() { m.DeleteMany(keys) })
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.DeleteMany(keys)
+		}()
 		wg.Wait()
 	}
 }

@@ -676,9 +676,11 @@ func TestDoubleInitRace(t *testing.T) {
 	var wg sync.WaitGroup
 
 	for range 100 {
-		wg.Go(func() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 			m.Store(1, 1)
-		})
+		}()
 	}
 
 	wg.Wait()

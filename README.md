@@ -90,11 +90,11 @@ m.DeleteMany([]string{"expired_1", "expired_2"})
 
 | Implementation | 1 CPU | 4 CPUs | 8 CPUs | Allocs/op |
 |---|---|---|---|---|
-| **`goshard`** | 65 ns | **26 ns** | **21 ns** | **0** |
-| `sync.Map` | 234 ns | 59 ns | 38 ns | 3 (64 B) |
-| `sync.RWMutex` map | 43 ns | 215 ns | 172 ns | 0 |
+| **`goshard`** | 54 ns | **24 ns** | **20 ns** | **0** |
+| `sync.Map` | 204 ns | 52 ns | 35 ns | 3 (65-75 B) |
+| `sync.RWMutex` map | 37 ns | 182 ns | 163 ns | 0 |
 
-`goshard` is slower than a bare mutex at 1 CPU (no contention), but **8.2x faster at 4 CPUs** where the global lock degrades under contention. `sync.Map` always allocates per-store regardless of CPU count.
+`goshard` is slower than a bare mutex at 1 CPU (no contention), but **7.6x faster at 4 CPUs** where the global lock degrades under contention. `sync.Map` always allocates per-store regardless of CPU count.
 
 ### Write-Read-Delete Cycle
 
@@ -103,25 +103,41 @@ This is the most representative high-churn workload: frequent writes and deletes
 
 | Implementation | 1 CPU | 4 CPUs | 8 CPUs | Allocs/op |
 |---|---|---|---|---|
-| **`goshard`** | 42 ns | **31 ns** | **30 ns** | **0** |
-| `sync.Map` | 63 ns | 207 ns | 221 ns | 2-3 (63-74 B) |
-| `sync.RWMutex` map | 25 ns | 159 ns | 174 ns | 0 |
+| **`goshard`** | 41 ns | **31 ns** | **29 ns** | **0** |
+| `sync.Map` | 60 ns | 199 ns | 226 ns | 2-3 (63-74 B) |
+| `sync.RWMutex` map | 26 ns | 153 ns | 176 ns | 0 |
 
-`goshard` is **7.4x faster** than `sync.Map` and **5.8x faster** than a global mutex at 8 CPUs — with zero heap allocations. `sync.Map` degrades under write-heavy parallel load because its promotion mechanism serialises writers; the global mutex simply saturates.
+`goshard` is **7.8x faster** than `sync.Map` and **6.1x faster** than a global mutex at 8 CPUs — with zero heap allocations. `sync.Map` degrades under write-heavy parallel load because its promotion mechanism serialises writers; the global mutex simply saturates.
 
 ### Batch Delete: `DeleteMany` vs Sequential Loop
 
 Shard-sorted batching (`DeleteMany`) vs sequential single-key `Delete` calls.
-Breakeven is around n=1,000 under parallel load; below that the sort overhead is net-negative single-threaded.
+`DeleteMany` deletes small batches (up to `max(8, shards/4)` keys) one by one, so it is never slower than the loop there; above that it sorts keys by shard and takes each shard lock once per group.
 
 | Batch size (n) | Loop 1 CPU | `DeleteMany` 1 CPU | Loop 8 CPUs | `DeleteMany` 8 CPUs |
 |---|---|---|---|---|
-| 10 | 113 ns | 113 ns | 209 ns | 222 ns |
-| 1,000 | 10,403 ns | 25,428 ns | 14,614 ns | **5,551 ns** |
-| 10,000 | 104,279 ns | 280,367 ns | 140,003 ns | **43,180 ns** |
-| 1,000,000 | 10.5 ms | 41.7 ms | 14.0 ms | **6.4 ms** |
+| 10 | 90 ns | 90 ns | 184 ns | 197 ns |
+| 1,000 | 8.3 µs | 15.1 µs | 10.7 µs | **3.3 µs** |
+| 10,000 | 83 µs | 188 µs | 105 µs | **33 µs** |
+| 1,000,000 | 8.3 ms | 35.6 ms | 10.5 ms | **6.0 ms** |
 
 At n=10,000 with 8 goroutines, `DeleteMany` is **3.2x faster** than a sequential loop. Single-threaded it is slower due to the slice sort; the batching benefit only materialises under parallel lock contention.
+
+### Iteration and Batch Delete by Value Size
+
+> `go test -bench=ValueSize -benchmem -count=3 ./...` (single goroutine)
+
+`All` and `LoadAndDeleteMany` copy entries into a stack buffer sized for the value type, so they allocate nothing for values of any size.
+
+| Value size | `All` (10,000 entries) | `LoadAndDeleteMany` (1,000 keys) | Allocs/op |
+|---|---|---|---|
+| 8 B | 77 µs | 16 µs | **0** |
+| 48 B | 114 µs | 16 µs | **0** |
+| 128 B | 193 µs | 18 µs | **0** |
+| 1 KiB | 0.96 ms | 45 µs | **0** |
+| 8 KiB | 10.2 ms | 308 µs | **0** |
+
+With the `purego` tag the buffer is a fixed 256 entries; values above ~500 B then cost one heap allocation per call.
 
 ## License
 
