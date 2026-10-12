@@ -148,6 +148,15 @@ At n=10,000 with 8 goroutines, `DeleteMany` is **3.2x faster** than a sequential
 
 With the `purego` tag the buffer is a fixed 256 entries; values above ~500 B then cost one heap allocation per call.
 
+## See also
+
+The sibling modules follow the same rule — nothing allocated on the hot path,
+the zero value ready to use:
+
+- [gosync](https://github.com/darxnet/gosync) — generic concurrent map with `sync.Map` semantics and no interface boxing, for read-mostly data
+- [goreset](https://github.com/darxnet/goreset) — generates `Reset()` for pooled structs: back to the zero state, memory kept
+- [gocopy](https://github.com/darxnet/gocopy) — generates `CopyFrom`/`Copy` that reuse the destination's memory instead of allocating
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE) for details.
