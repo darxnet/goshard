@@ -740,3 +740,82 @@ func TestPoolLargeSlice(t *testing.T) {
 	}
 	m.DeleteMany(keys)
 }
+
+func TestGrow(t *testing.T) {
+	t.Parallel()
+
+	var m goshard.Map[int, int]
+	m.Grow(0) // no-op on the zero map
+	if !m.Empty() {
+		t.Fatal("Grow(0) added entries")
+	}
+
+	for i := range 100 {
+		m.Store(i, i)
+	}
+	m.Grow(10_000)
+	m.Grow(10_000) // shards already have room: nothing is rebuilt
+	for i := 100; i < 10_000; i++ {
+		m.Store(i, i)
+	}
+	if got := m.Len(); got != 10_000 {
+		t.Fatalf("Len = %d, want 10000", got)
+	}
+	for i := range 10_000 {
+		if v, ok := m.Load(i); !ok || v != i {
+			t.Fatalf("Load(%d) = %d, %v", i, v, ok)
+		}
+	}
+
+	m.Clear()
+	m.Grow(1) // smaller than the room left after Clear
+	if !m.Empty() {
+		t.Fatal("Grow after Clear added entries")
+	}
+}
+
+func TestGrowZeroMapInits(t *testing.T) {
+	t.Parallel()
+
+	var m goshard.Map[string, int]
+	m.Grow(5)
+	m.Store("a", 1)
+	if v, ok := m.Load("a"); !ok || v != 1 {
+		t.Fatalf("Load = %d, %v", v, ok)
+	}
+}
+
+func TestGrowPanicsOnNegative(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Grow(-1) did not panic")
+		}
+	}()
+	var m goshard.Map[int, int]
+	m.Grow(-1)
+}
+
+func TestGrowConcurrentWithStore(t *testing.T) {
+	t.Parallel()
+
+	m := goshard.NewMap[int, int](8)
+	var wg sync.WaitGroup
+	for w := range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 1_000 {
+				m.Store(w*1_000+i, i)
+				if i%100 == 0 {
+					m.Grow(i)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if got := m.Len(); got != 4_000 {
+		t.Fatalf("Len = %d, want 4000", got)
+	}
+}

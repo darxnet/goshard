@@ -13,6 +13,7 @@ import (
 	"hash/maphash"
 	"io"
 	"iter"
+	"maps"
 	"math/bits"
 	"runtime"
 	"slices"
@@ -39,7 +40,12 @@ type shard[K comparable, V any] struct {
 	_  cacheLinePad
 	m  map[K]V
 	rw sync.RWMutex
-	_  cacheLinePad
+	// room is a lower bound on how many entries m holds without growing:
+	// the size hint m was made with. Go maps never shrink, not even on
+	// clear or delete, so the bound stays true. Grow uses it to skip shards
+	// that are already big enough.
+	room int
+	_    cacheLinePad
 }
 
 // Map is a concurrent-safe sharded map optimized for reduced lock contention
@@ -91,6 +97,7 @@ func (sm *Map[K, V]) initSlow(n int) {
 	sm.shards = make([]shard[K, V], pow2)
 	for i := range sm.shards {
 		sm.shards[i].m = make(map[K]V, 1)
+		sm.shards[i].room = 1
 	}
 	sm.mask = pow2 - 1
 	sm.seed = maphash.MakeSeed()
@@ -389,6 +396,37 @@ func (sm *Map[K, V]) Empty() bool {
 		}
 	}
 	return true
+}
+
+// Grow increases the map's capacity, if necessary, to guarantee space for
+// another n entries. After Grow(n), about n entries can be stored in the map
+// without another allocation: each shard gets space for its share of n, and
+// a shard that receives more than its share may still grow once.
+// If n is negative, Grow panics.
+func (sm *Map[K, V]) Grow(n int) {
+	if n < 0 {
+		panic("goshard: negative Grow count")
+	}
+	if n == 0 {
+		return
+	}
+
+	sm.init(0)
+
+	// Round up so that every shard gets at least one slot.
+	share := (n-1)/len(sm.shards) + 1
+
+	for i := range sm.shards {
+		s := &sm.shards[i]
+		s.rw.Lock()
+		if want := len(s.m) + share; want > s.room {
+			m := make(map[K]V, want)
+			maps.Copy(m, s.m)
+			s.m = m
+			s.room = want
+		}
+		s.rw.Unlock()
+	}
 }
 
 // keyBatch is how many keys DeleteMany and LoadAndDeleteMany sort at once.

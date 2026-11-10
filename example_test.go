@@ -125,6 +125,21 @@ func ExampleMap_deleteMany() {
 	// true
 }
 
+// ExampleMap_grow pre-sizes the shards before a bulk load, so they do not
+// rehash repeatedly while filling up.
+func ExampleMap_grow() {
+	var m goshard.Map[int, int]
+	m.Grow(10_000)
+	for i := range 10_000 {
+		m.Store(i, i*i)
+	}
+
+	fmt.Println(m.Len())
+
+	// Output:
+	// 10000
+}
+
 // ExampleMap_gobEncode demonstrates encoding a map to bytes and decoding
 // it back into a new map using encoding/gob.
 func ExampleMap_gobEncode() {

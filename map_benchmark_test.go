@@ -357,3 +357,24 @@ func benchmarkStoreDelete(b *testing.B, shards, n int, del func(*goshard.Map[int
 		}
 	})
 }
+
+// BenchmarkBulkLoad fills a fresh map with n keys, with and without Grow.
+func BenchmarkBulkLoad(b *testing.B) {
+	keys := prepareKeys(b)
+
+	for _, n := range []int{10_000, 1_000_000} {
+		for _, grow := range []bool{false, true} {
+			b.Run(fmt.Sprintf("n=%d/grow=%v", n, grow), func(b *testing.B) {
+				for b.Loop() {
+					var m goshard.Map[int, int]
+					if grow {
+						m.Grow(n)
+					}
+					for _, k := range keys[:n] {
+						m.Store(k, k)
+					}
+				}
+			})
+		}
+	}
+}

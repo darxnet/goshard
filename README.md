@@ -40,6 +40,7 @@ the generic hash-trie behind `sync.Map`, with lock-free, allocation-free loads.
 - **Zero-Allocation Hot Path** — `Store`, `Load`, `Delete`, and `Swap` allocate nothing on the heap for `comparable` types.
 - **Cache-Line Padding** — Prevents "false sharing" by ensuring shard locks don't collide on the same CPU cache line.
 - **Shard-aware Batching** — `DeleteMany` and `LoadAndDeleteMany` pre-sort keys to process entire groups under a single lock acquisition per shard.
+- **Pre-sizing** — `Grow(n)` makes room for `n` more entries across the shards before a bulk load, so they do not rehash while filling up.
 - **Atomic Compute** — Perform complex read-modify-write logic atomically within a single shard lock.
 - **Go 1.24+** — Native `for range` iteration via `All()`.
 - **Serialization** — Built-in `GobEncode` and `GobDecode` for easy persistence or network transfer.
@@ -86,6 +87,9 @@ counter, loaded := m.Compute("counter", func(key string, current int, loaded boo
     return current + 1, true // keep = true to store
 })
 
+// Pre-size before a bulk load
+m.Grow(100_000)
+
 // Batch delete
 m.DeleteMany([]string{"expired_1", "expired_2"})
 ```
@@ -131,6 +135,17 @@ Shard-sorted batching (`DeleteMany`) vs sequential single-key `Delete` calls.
 | 1,000,000 | 8.3 ms | 35.6 ms | 10.5 ms | **6.0 ms** |
 
 At n=10,000 with 8 goroutines, `DeleteMany` is **3.2x faster** than a sequential loop. Single-threaded it is slower due to the slice sort; the batching benefit only materialises under parallel lock contention.
+
+### Bulk Load: `Grow` Before `Store`
+
+> `go test -bench=BulkLoad -benchmem -count=5 -cpu=1 ./...`
+
+Storing `n` keys into a fresh map, with and without `m.Grow(n)` first.
+
+| n | Without `Grow` | With `Grow` | Memory | Allocs/op |
+|---|---|---|---|---|
+| 10,000 | 0.41 ms | **0.21 ms** | 615 KiB → **331 KiB** | 833 → **322** |
+| 1,000,000 | 66 ms | **59 ms** | 72 MiB → **36 MiB** | 9,330 → **4,290** |
 
 ### Iteration and Batch Delete by Value Size
 
