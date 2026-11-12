@@ -565,6 +565,8 @@ func (sm *Map[K, V]) Compute(key K, f func(key K, current V, loaded bool) (next 
 // GobEncode encodes all non-empty map shards as a sequence of gob maps.
 // Empty shards are skipped; GobDecode reads until EOF and handles a variable
 // number of encoded maps correctly.
+// Each shard is read-locked while it is encoded, so GobEncode or
+// MarshalBinary methods of K and V must not write to the map.
 func (sm *Map[K, V]) GobEncode() ([]byte, error) {
 	if sm.inited.Load() == 0 {
 		return nil, nil
@@ -574,20 +576,25 @@ func (sm *Map[K, V]) GobEncode() ([]byte, error) {
 	enc := gob.NewEncoder(&w)
 
 	for i := range sm.shards {
-		s := &sm.shards[i]
-		s.rw.RLock()
-		if len(s.m) == 0 {
-			s.rw.RUnlock()
-			continue
-		}
-		err := enc.Encode(s.m)
-		s.rw.RUnlock()
-		if err != nil {
+		if err := sm.shards[i].encode(enc); err != nil {
 			return nil, err
 		}
 	}
 
 	return w.Bytes(), nil
+}
+
+// encode encodes the shard map with enc unless it is empty. The read lock is
+// released by a deferred call, so that a panicking GobEncode or MarshalBinary
+// method of K or V does not leave the shard locked.
+func (s *shard[K, V]) encode(enc *gob.Encoder) error {
+	s.rw.RLock()
+	defer s.rw.RUnlock()
+
+	if len(s.m) == 0 {
+		return nil
+	}
+	return enc.Encode(s.m)
 }
 
 // GobDecode merges gob-encoded shard maps into the map. It applies each decoded
