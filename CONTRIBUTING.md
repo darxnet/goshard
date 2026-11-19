@@ -29,7 +29,8 @@ A `perf:` change that users should know about belongs in a `feat:` commit.
     go test -race -count=1 -tags purego ./...
     golangci-lint run --build-tags purego ./...
 
-CI runs the same checks on the stable and oldstable Go releases, on Linux (amd64) and macOS (arm64),
+CI runs the same checks on the stable and oldstable Go releases, on Linux (amd64 and arm64)
+and on macOS (arm64, stable Go only; it does not block merging),
 plus `govulncheck` and a coverage gate.
 
 ## Changes on a hot path
